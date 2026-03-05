@@ -1,0 +1,8 @@
+# do not apply this file, not a kubernetes manifest
+type: S3
+config:
+  bucket: ${BUCKET_NAME}
+  endpoint: ${ENDPOINT}
+  access_key: ${ACCESS_KEY}
+  secret_key: ${SECRET_KEY}
+  insecure: false

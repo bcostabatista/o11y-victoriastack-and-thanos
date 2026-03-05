@@ -1,0 +1,59 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: thanos-compactor
+  namespace: opentelemetry
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: thanos-compactor
+        spec:
+          restartPolicy: Never
+          securityContext:
+            fsGroup: 65534
+            fsGroupChangePolicy: "OnRootMismatch"
+          containers:
+            - name: compactor
+              image: quay.io/thanos/thanos:v0.41.0
+              args:
+                - compact
+                - --http-address=0.0.0.0:10902
+                - --data-dir=/var/thanos/compact
+                - --objstore.config-file=/etc/thanos/objstore/thanos.yaml
+                - --retention.resolution-raw=30d
+                - --retention.resolution-5m=180d
+                - --retention.resolution-1h=2y
+              ports:
+                - name: http
+                  containerPort: 10902
+              securityContext:
+                runAsUser: 65534
+                runAsGroup: 65534
+                runAsNonRoot: true
+                allowPrivilegeEscalation: false
+              volumeMounts:
+                - name: data
+                  mountPath: /var/thanos/compact
+                - name: objstore
+                  mountPath: /etc/thanos/objstore
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 200m
+                  memory: 512Mi
+                limits:
+                  cpu: "2"
+                  memory: 4Gi
+          volumes:
+            - name: objstore
+              secret:
+                secretName: thanos-objstore
+            - name: data
+              emptyDir: {}

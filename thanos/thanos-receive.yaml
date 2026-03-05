@@ -1,0 +1,117 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: thanos-receive
+  namespace: opentelemetry
+  labels:
+    app: thanos-receive
+spec:
+  selector:
+    app: thanos-receive
+  ports:
+    - name: grpc
+      port: 10901
+      targetPort: 10901
+    - name: http
+      port: 10902
+      targetPort: 10902
+    - name: remote-write
+      port: 19291
+      targetPort: 19291
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: thanos-receive
+  namespace: opentelemetry
+spec:
+  serviceName: thanos-receive
+  replicas: 1
+  selector:
+    matchLabels:
+      app: thanos-receive
+  template:
+    metadata:
+      labels:
+        app: thanos-receive
+    spec:
+      securityContext:
+        fsGroup: 65534
+        fsGroupChangePolicy: "OnRootMismatch"
+
+      initContainers:
+        - name: fix-permissions
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              set -eux
+              mkdir -p /var/thanos/receive
+              chown -R 65534:65534 /var/thanos/receive
+              chmod -R u+rwX,g+rwX,o-rwx /var/thanos/receive
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: data
+              mountPath: /var/thanos/receive
+
+      containers:
+        - name: thanos-receive
+          image: quay.io/thanos/thanos:v0.41.0
+          args:
+            - receive
+            - --grpc-address=0.0.0.0:10901
+            - --http-address=0.0.0.0:10902
+            - --remote-write.address=0.0.0.0:19291
+            - --tsdb.path=/var/thanos/receive
+            - --label=receive="true"
+            - --receive.hashrings-file=/etc/thanos/hashring.json
+            - --receive.local-endpoint=127.0.0.1:10901
+            - --objstore.config-file=/etc/thanos/objstore/thanos.yaml
+          ports:
+            - name: grpc
+              containerPort: 10901
+            - name: http
+              containerPort: 10902
+            - name: remote-write
+              containerPort: 19291
+          securityContext:
+            runAsUser: 65534
+            runAsGroup: 65534
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: data
+              mountPath: /var/thanos/receive
+            - name: hashring
+              mountPath: /etc/thanos
+            - name: objstore
+              mountPath: /etc/thanos/objstore
+              readOnly: true
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+
+      volumes:
+        - name: hashring
+          configMap:
+            name: thanos-receive-hashring
+        - name: objstore
+          secret:
+            secretName: thanos-objstore
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi

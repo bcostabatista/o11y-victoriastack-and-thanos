@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: thanos-receive-hashring
+  namespace: opentelemetry
+data:
+  hashring.json: |
+    [
+      {
+        "hashring": "default",
+        "tenants": [],
+        "endpoints": ["127.0.0.1:10901"]
+      }
+    ]

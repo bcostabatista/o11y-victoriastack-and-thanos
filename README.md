@@ -1,6 +1,33 @@
 # Observability Stack
 
-This repository contains all Kubernetes manifests for deploying an observability stack with either VictoriaMetrics + VictoriaLogs or Thanos. The stack covers metrics collection, long-term storage, and visualization, following the Four Golden Signals and a defined SLO/SLA policy.
+This repository contains all Kubernetes manifests for deploying an observability stack covering metrics collection, long-term storage, log aggregation, and visualization. It follows the Four Golden Signals and a defined SLO/SLA policy.
+
+Two backend options are available. Choose one based on your operational needs:
+
+- **Thanos** - production-grade, long-term storage via object storage, multi-component
+- **VictoriaMetrics** *(optional)* - single-node, self-contained, much simpler to operate
+
+---
+
+## Choosing a Stack
+
+| | Thanos | VictoriaMetrics (single-node) |
+|---|---|---|
+| **Setup complexity** | High - 4 components + object storage | Low - 2 deployments |
+| **Resource usage** | Higher | Very low |
+| **Long-term storage** | Unlimited (DigitalOcean Spaces/S3) | Local disk only (20Gi, 90d retention) |
+| **Log aggregation** | Not included | VictoriaLogs included |
+| **HA / deduplication** | Built-in | Not available in single-node |
+| **Multi-cluster query** | Yes (Thanos Query fans out) | No |
+| **Downsampling** | Yes (Compactor, up to 2 years) | No |
+| **Operational overhead** | Higher | Minimal |
+| **Prometheus-compatible API** | Yes (Thanos Query) | Yes |
+
+**Use Thanos** if you need long retention (months/years), multi-cluster visibility, or high availability.
+
+**Use VictoriaMetrics** if you want a simple, low-cost stack that is fast to deploy and easy to maintain - ideal for single-cluster setups where 90 days of metrics and 30 days of logs are sufficient.
+
+---
 
 ## Accessing Grafana
 
@@ -11,6 +38,8 @@ All dashboards are available there. No port-forward required.
 ---
 
 ## Architecture Overview
+
+### Option A: Thanos
 
 ```
 Cluster Nodes
@@ -48,12 +77,44 @@ Grafana
   └── exposed at https://grafana.$domain.com (Traefik + cert-manager)
 ```
 
+### Option B: VictoriaMetrics (single-node)
+
+```
+Cluster Nodes
+  └── node-exporter (DaemonSet)          # hardware & OS metrics per node
+  └── kube-state-metrics (Deployment)    # Kubernetes object state metrics
+  └── promtail (DaemonSet)               # collects pod logs from /var/log
+
+Prometheus (StatefulSet)
+  ├── scrapes node-exporter
+  ├── scrapes kube-state-metrics
+  ├── scrapes itself
+  └── remote_write ──────────────────────► VictoriaMetrics :8428
+
+VictoriaMetrics (Deployment, single-node)
+  ├── accepts remote_write from Prometheus
+  ├── stores metrics locally (20Gi PVC, 90d retention)
+  └── exposes Prometheus-compatible query API
+
+Promtail (DaemonSet)
+  └── ships pod logs ─────────────────────► VictoriaLogs :9428 (Loki API)
+
+VictoriaLogs (Deployment, single-node)
+  ├── receives logs from Promtail
+  └── stores logs locally (50Gi PVC, 30d retention)
+
+Grafana
+  ├── datasource: VictoriaMetrics (Prometheus-compatible)
+  ├── datasource: VictoriaLogs (requires victoriametrics-logs-datasource plugin)
+  └── exposed at https://grafana.$domain.com (Traefik + cert-manager)
+```
+
 ---
 
 ## Components
 
 ### Prometheus `v2.51.2`
-The metrics collector. Runs as a StatefulSet with persistent storage and scrapes all configured targets at regular intervals. It does **not** store data long-term locally - everything is shipped to Thanos Receive via `remote_write`.
+The metrics collector. Runs as a StatefulSet with persistent storage and scrapes all configured targets at regular intervals. It does **not** store data long-term locally - everything is shipped via `remote_write` to either Thanos Receive or VictoriaMetrics depending on which stack is active.
 
 - Config: [prometheus/prometheus-configmap.yaml](prometheus/prometheus-configmap.yaml)
 - Manifest: [prometheus/prometheus.yaml](prometheus/prometheus.yaml)
@@ -77,7 +138,7 @@ Provides real-time resource usage (CPU/memory) to the Kubernetes API (`kubectl t
 
 - Manifest: [kube/metrics-server.yaml](kube/metrics-server.yaml)
 
-### Thanos `v0.41.0`
+### Thanos `v0.41.0` *(Option A)*
 Thanos extends Prometheus with long-term storage and global query across multiple instances. It is deployed as four separate components:
 
 | Component | Role |
@@ -91,8 +152,27 @@ Object storage backend: **DigitalOcean Spaces** (S3-compatible).
 
 - Manifests: [thanos/](thanos/)
 
+### VictoriaMetrics `v1.112.0` *(Option B)*
+A single-node deployment that replaces the entire Thanos stack. Accepts `remote_write` from Prometheus and exposes a fully Prometheus-compatible query API. No object storage, no multiple components - just one Deployment and a PVC.
+
+- 20Gi local storage, 90-day retention
+- Port: `:8428`
+- Manifest: [victoriastack/metrics.yaml](victoriastack/metrics.yaml)
+
+### VictoriaLogs `v1.21.0` *(Option B)*
+A single-node log aggregation backend, part of the VictoriaMetrics stack. Receives logs from Promtail via the Loki-compatible HTTP API. Requires the `victoriametrics-logs-datasource` Grafana plugin - see [victoriastack/README.md](victoriastack/README.md) for setup instructions.
+
+- 50Gi local storage, 30-day retention
+- Port: `:9428`
+- Manifest: [victoriastack/logs.yaml](victoriastack/logs.yaml)
+
+### Promtail `v3.4.1` *(Option B)*
+Runs as a DaemonSet - one pod per node. Reads container logs from `/var/log/pods` and ships them to VictoriaLogs via the Loki push API. Attaches labels for namespace, pod, container, node, and app.
+
+- Manifest: [victoriastack/logs.yaml](victoriastack/logs.yaml) (bundled with VictoriaLogs)
+
 ### Grafana `v11.2.0`
-The visualization layer. Connects to Thanos Query as its Prometheus-compatible datasource, giving it access to both recent and historical metrics through a single endpoint.
+The visualization layer. Connects to either Thanos Query or VictoriaMetrics as its Prometheus-compatible datasource.
 
 Includes two dashboards:
 - **SLO/SLA Dashboard** (`grafana/slo-dashboard.json`): SLO compliance, error budget, Four Golden Signals, infrastructure health, Kubernetes state, and observability stack health.
@@ -104,6 +184,8 @@ Includes two dashboards:
 ---
 
 ## Metrics Collection Flow
+
+### Option A: Thanos
 
 ```
 [Node hardware / OS]
@@ -145,6 +227,40 @@ Grafana :3000
 https://grafana.$domain.com
 ```
 
+### Option B: VictoriaMetrics (single-node)
+
+```
+[Node hardware / OS]
+       │
+       ▼
+node-exporter :9100
+       │
+       │   (scrape)
+       ▼
+[Kubernetes API]
+       │
+       ▼
+kube-state-metrics :8080
+       │
+       │   (scrape)
+       ▼
+Prometheus :9090
+       │
+       │   remote_write
+       ▼
+VictoriaMetrics :8428
+       │   (20Gi PVC, 90d retention)
+       │
+       │   PromQL / MetricsQL
+       ▼
+Grafana :3000 ◄──────────────────────── VictoriaLogs :9428
+       │                                      ▲
+       ▼                                      │  (Loki push API)
+https://grafana.$domain.com          Promtail (DaemonSet)
+                                              │
+                                     /var/log/pods/* (all nodes)
+```
+
 ---
 
 ## SLO / SLA Policy
@@ -177,6 +293,8 @@ kubectl get all -n opentelemetry
 
 ## Retention Policy
 
+### Thanos
+
 | Resolution | Retention |
 |------------|-----------|
 | Raw (per-scrape) | 30 days |
@@ -184,3 +302,12 @@ kubectl get all -n opentelemetry
 | 1-hour downsampled | 2 years |
 
 Downsampling is applied automatically by Thanos Compactor.
+
+### VictoriaMetrics
+
+| Signal | Retention |
+|--------|-----------|
+| Metrics | 90 days (local PVC) |
+| Logs | 30 days (local PVC) |
+
+No downsampling. Storage is bounded by the PVC size defined in the manifests.

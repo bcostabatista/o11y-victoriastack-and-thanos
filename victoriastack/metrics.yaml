@@ -32,6 +32,7 @@ spec:
       labels:
         app: victoriametrics
     spec:
+      serviceAccountName: victoriametrics
       containers:
         - name: victoriametrics
           image: victoriametrics/victoria-metrics:v1.112.0
@@ -41,12 +42,15 @@ spec:
             - -httpListenAddr=:8428
             - -selfScrapeInterval=10s
             - -promscrape.suppressDuplicateScrapeTargetErrors=true
+            - -promscrape.config=/config/scrape.yaml
           ports:
             - name: http
               containerPort: 8428
           volumeMounts:
             - name: storage
               mountPath: /storage
+            - name: scrape-config
+              mountPath: /config
           resources:
             requests:
               cpu: 100m
@@ -70,6 +74,9 @@ spec:
         - name: storage
           persistentVolumeClaim:
             claimName: victoriametrics-data
+        - name: scrape-config
+          configMap:
+            name: victoriametrics-scrape-config
 
 ---
 apiVersion: v1
